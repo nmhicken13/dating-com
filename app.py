@@ -355,8 +355,121 @@ def _met_via_select_index(stored: object) -> int:
     return MET_VIA_OPTIONS.index(MET_VIA_ORGANIC)
 
 
+def _coerce_secret_str(val: object) -> str | None:
+    if val is None:
+        return None
+    if isinstance(val, (list, dict)):
+        return None
+    s = str(val).strip().strip('"').strip("'")
+    return s or None
+
+
+def _secrets_key_names(sec: object) -> list[str]:
+    try:
+        keys = getattr(sec, "keys", None)
+        if callable(keys):
+            return [str(k) for k in keys()]
+    except Exception:
+        pass
+    return []
+
+
+def _secret_flat_get(sec: object, *candidates: str) -> str | None:
+    """Exact key, attribute, or case-insensitive match."""
+    if sec is None:
+        return None
+    want = {c.upper().replace("-", "_") for c in candidates}
+    for name in candidates:
+        try:
+            if name in sec:
+                v = _coerce_secret_str(sec[name])
+                if v:
+                    return v
+        except Exception:
+            pass
+        try:
+            v = getattr(sec, name, None)
+            if v is not None:
+                s = _coerce_secret_str(v)
+                if s:
+                    return s
+        except Exception:
+            pass
+    try:
+        for k in sec:
+            kn = str(k).upper().replace("-", "_")
+            if kn in want:
+                v = _coerce_secret_str(sec[k])
+                if v:
+                    return v
+    except Exception:
+        pass
+    return None
+
+
+def _is_placeholder_url(u: str) -> bool:
+    return "YOUR_PROJECT" in u or u == "https://xxxx.supabase.co"
+
+
+def _is_placeholder_key(k: str) -> bool:
+    low = k.lower()
+    return low.startswith("your-anon") or low == "eyj..." or len(k) < 20
+
+
+def _supabase_from_toml_dict(data: dict[str, object]) -> tuple[str | None, str | None]:
+    url = _secret_flat_get(
+        data,
+        "SUPABASE_URL",
+        "supabase_url",
+        "SUPABASE_URI",
+    )
+    key = _secret_flat_get(
+        data,
+        "SUPABASE_ANON_KEY",
+        "supabase_anon_key",
+        "ANON_KEY",
+        "SUPABASE_KEY",
+    )
+    sub = data.get("supabase")
+    if isinstance(sub, dict):
+        if not url:
+            for nk in ("url", "SUPABASE_URL"):
+                if nk in sub:
+                    url = _coerce_secret_str(sub.get(nk))
+                    break
+        if not key:
+            for nk in ("anon_key", "anon", "key", "SUPABASE_ANON_KEY"):
+                if nk in sub:
+                    key = _coerce_secret_str(sub.get(nk))
+                    break
+    if url and _is_placeholder_url(url):
+        url = None
+    if key and _is_placeholder_key(key):
+        key = None
+    return url, key
+
+
+def _supabase_from_project_secrets_file() -> tuple[str | None, str | None]:
+    """When Streamlit cwd is wrong, st.secrets may miss `.streamlit/secrets.toml` next to app.py."""
+    path = Path(__file__).resolve().parent / ".streamlit" / "secrets.toml"
+    if not path.is_file():
+        return None, None
+    try:
+        import tomllib
+    except ImportError:
+        return None, None
+    try:
+        with path.open("rb") as f:
+            data = tomllib.load(f)
+    except Exception:
+        return None, None
+    if not isinstance(data, dict):
+        return None, None
+    return _supabase_from_toml_dict(data)
+
+
 def _supabase_url_and_key() -> tuple[str | None, str | None]:
-    """Supabase URL + anon key: st.secrets (flat or [supabase]), then env vars."""
+    """URL + anon: st.secrets, env, then `app_dir/.streamlit/secrets.toml` (local cwd fix)."""
     url: str | None = None
     key: str | None = None
     try:
@@ -364,42 +477,84 @@ def _supabase_url_and_key() -> tuple[str | None, str | None]:
     except Exception:
         sec = None
     if sec is not None:
-        try:
-            if "SUPABASE_URL" in sec:
-                u = str(sec["SUPABASE_URL"]).strip()
-                if u and "YOUR_PROJECT" not in u:
-                    url = u
-            if "SUPABASE_ANON_KEY" in sec:
-                k = str(sec["SUPABASE_ANON_KEY"]).strip()
-                if k and not k.lower().startswith("your-anon"):
-                    key = k
-        except Exception:
-            pass
-        if (not url or not key) and sec is not None and "supabase" in sec:
+        url = _secret_flat_get(sec, "SUPABASE_URL", "supabase_url", "SUPABASE_URI")
+        key = _secret_flat_get(
+            sec,
+            "SUPABASE_ANON_KEY",
+            "supabase_anon_key",
+            "ANON_KEY",
+            "SUPABASE_KEY",
+        )
+        if (not url or not key) and sec is not None:
             try:
-                sub = sec["supabase"]
-                if not url and "url" in sub:
-                    u = str(sub["url"]).strip()
-                    if u and "YOUR_PROJECT" not in u:
-                        url = u
-                if not key:
-                    for nk in ("anon_key", "anon", "key"):
-                        if nk in sub:
-                            k = str(sub[nk]).strip()
-                            if k and not k.lower().startswith("your-anon"):
-                                key = k
-                            break
+                if "supabase" in sec:
+                    sub = sec["supabase"]
+                    if not url:
+                        for nk in ("url", "SUPABASE_URL"):
+                            try:
+                                if nk in sub:
+                                    url = _coerce_secret_str(sub[nk])
+                                    break
+                            except Exception:
+                                pass
+                    if not key:
+                        for nk in ("anon_key", "anon", "key", "SUPABASE_ANON_KEY"):
+                            try:
+                                if nk in sub:
+                                    key = _coerce_secret_str(sub[nk])
+                                    break
+                            except Exception:
+                                pass
             except Exception:
                 pass
+    if url and _is_placeholder_url(url):
+        url = None
+    if key and _is_placeholder_key(key):
+        key = None
     if not url:
         u = (os.environ.get("SUPABASE_URL") or "").strip()
-        if u and "YOUR_PROJECT" not in u:
+        if u and not _is_placeholder_url(u):
             url = u
     if not key:
         k = (os.environ.get("SUPABASE_ANON_KEY") or "").strip()
-        if k and not k.lower().startswith("your-anon"):
+        if k and not _is_placeholder_key(k):
             key = k
+    if not url or not key:
+        fu, fk = _supabase_from_project_secrets_file()
+        url = url or fu
+        key = key or fk
     return url, key
+
+
+def _render_supabase_missing_help() -> None:
+    st.error(
+        "Missing Supabase URL or anon key. "
+        "**Streamlit Cloud:** [App settings](https://docs.streamlit.io/deploy/streamlit-community-cloud/manage-your-app/app-settings) "
+        "→ **Secrets** — paste TOML with `SUPABASE_URL` and `SUPABASE_ANON_KEY`, **Save**, then **Reboot app**. "
+        "**Local:** `.streamlit/secrets.toml` next to `app.py`, or run `streamlit run app.py` from the repo folder."
+    )
+    with st.expander("Troubleshooting (no secret values shown)"):
+        try:
+            sec = st.secrets
+            names = _secrets_key_names(sec)
+            st.caption(
+                f"**Top-level secret keys Streamlit loaded:** {len(names)}"
+                + (f" — `{', '.join(sorted(names))}`" if names else " (none — Cloud Secrets empty or TOML parse error?)")
+            )
+        except Exception as e:
+            st.caption(f"Could not read `st.secrets`: `{type(e).__name__}`")
+        p = Path(__file__).resolve().parent / ".streamlit" / "secrets.toml"
+        fu, fk = _supabase_from_project_secrets_file()
+        if fu or fk:
+            fmsg = "loaded Supabase keys from file"
+        elif p.is_file():
+            fmsg = "file exists but no usable `SUPABASE_URL` / `SUPABASE_ANON_KEY`"
+        else:
+            fmsg = "file not on server (expected on Cloud — use **Secrets** in settings)"
+        st.caption(f"**Fallback** `{p.name}` next to app: {fmsg}")
+        env_u = bool((os.environ.get("SUPABASE_URL") or "").strip())
+        env_k = bool((os.environ.get("SUPABASE_ANON_KEY") or "").strip())
+        st.caption(f"**Environment variables:** `SUPABASE_URL` set={env_u}, `SUPABASE_ANON_KEY` set={env_k}")
 
 
 def _supabase_secrets_ok() -> bool:
@@ -450,16 +605,7 @@ def render_auth_screen() -> None:
     st.title("Dating tracker")
     st.caption("Sign in to your account — data is private to you.")
     if not _supabase_secrets_ok():
-        st.error(
-            "Missing Supabase credentials (or still using placeholder values). "
-            "**Streamlit Cloud:** **Manage app** → **Secrets** — paste exactly:\n\n"
-            "```\n"
-            "SUPABASE_URL = \"https://xxxx.supabase.co\"\n"
-            "SUPABASE_ANON_KEY = \"eyJ...\"\n"
-            "```\n\n"
-            "Save, then **Manage app** → **Reboot app**. "
-            "**Local:** `.streamlit/secrets.toml` with the same keys; run `streamlit run app.py` from the repo folder."
-        )
+        _render_supabase_missing_help()
         return
     client = _supabase_client()
     t_log, t_sign = st.tabs(["Log in", "Sign up"])
@@ -2390,12 +2536,7 @@ def main() -> None:
     )
 
     if not _supabase_secrets_ok():
-        st.error(
-            "Missing Supabase credentials (or placeholders). "
-            "Cloud: **Secrets** (TOML as in the login screen help), then **Reboot app**. "
-            "Local: `.streamlit/secrets.toml`; run from repo root. "
-            "Optional env: `SUPABASE_URL`, `SUPABASE_ANON_KEY`."
-        )
+        _render_supabase_missing_help()
         return
 
     client = _supabase_client()
