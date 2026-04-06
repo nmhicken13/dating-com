@@ -5,6 +5,7 @@ Streamlit dating tracker — multi-tenant SaaS via Supabase (Postgres + Auth).
 from __future__ import annotations
 
 import io
+import os
 import re
 import uuid
 from datetime import date, datetime, time
@@ -354,9 +355,62 @@ def _met_via_select_index(stored: object) -> int:
     return MET_VIA_OPTIONS.index(MET_VIA_ORGANIC)
 
 
+def _supabase_url_and_key() -> tuple[str | None, str | None]:
+    """Supabase URL + anon key: st.secrets (flat or [supabase]), then env vars."""
+    url: str | None = None
+    key: str | None = None
+    try:
+        sec = st.secrets
+    except Exception:
+        sec = None
+    if sec is not None:
+        try:
+            if "SUPABASE_URL" in sec:
+                u = str(sec["SUPABASE_URL"]).strip()
+                if u and "YOUR_PROJECT" not in u:
+                    url = u
+            if "SUPABASE_ANON_KEY" in sec:
+                k = str(sec["SUPABASE_ANON_KEY"]).strip()
+                if k and not k.lower().startswith("your-anon"):
+                    key = k
+        except Exception:
+            pass
+        if (not url or not key) and sec is not None and "supabase" in sec:
+            try:
+                sub = sec["supabase"]
+                if not url and "url" in sub:
+                    u = str(sub["url"]).strip()
+                    if u and "YOUR_PROJECT" not in u:
+                        url = u
+                if not key:
+                    for nk in ("anon_key", "anon", "key"):
+                        if nk in sub:
+                            k = str(sub[nk]).strip()
+                            if k and not k.lower().startswith("your-anon"):
+                                key = k
+                            break
+            except Exception:
+                pass
+    if not url:
+        u = (os.environ.get("SUPABASE_URL") or "").strip()
+        if u and "YOUR_PROJECT" not in u:
+            url = u
+    if not key:
+        k = (os.environ.get("SUPABASE_ANON_KEY") or "").strip()
+        if k and not k.lower().startswith("your-anon"):
+            key = k
+    return url, key
+
+
+def _supabase_secrets_ok() -> bool:
+    u, k = _supabase_url_and_key()
+    return bool(u and k)
+
+
 def _supabase_client() -> Client:
-    url = str(st.secrets["SUPABASE_URL"])
-    key = str(st.secrets["SUPABASE_ANON_KEY"])
+    url, key = _supabase_url_and_key()
+    if not url or not key:
+        raise RuntimeError("Supabase URL or anon key missing")
     client = create_client(url, key)
     at = st.session_state.get(SESSION_ACCESS_TOKEN_KEY)
     rt = st.session_state.get(SESSION_REFRESH_TOKEN_KEY)
@@ -395,10 +449,16 @@ def render_auth_screen() -> None:
     )
     st.title("Dating tracker")
     st.caption("Sign in to your account — data is private to you.")
-    if "SUPABASE_URL" not in st.secrets or "SUPABASE_ANON_KEY" not in st.secrets:
+    if not _supabase_secrets_ok():
         st.error(
-            "Add **SUPABASE_URL** and **SUPABASE_ANON_KEY** to `.streamlit/secrets.toml`. "
-            "See `.streamlit/secrets.toml.example`."
+            "Missing Supabase credentials (or still using placeholder values). "
+            "**Streamlit Cloud:** **Manage app** → **Secrets** — paste exactly:\n\n"
+            "```\n"
+            "SUPABASE_URL = \"https://xxxx.supabase.co\"\n"
+            "SUPABASE_ANON_KEY = \"eyJ...\"\n"
+            "```\n\n"
+            "Save, then **Manage app** → **Reboot app**. "
+            "**Local:** `.streamlit/secrets.toml` with the same keys; run `streamlit run app.py` from the repo folder."
         )
         return
     client = _supabase_client()
@@ -2329,9 +2389,12 @@ def main() -> None:
         unsafe_allow_html=True,
     )
 
-    if "SUPABASE_URL" not in st.secrets or "SUPABASE_ANON_KEY" not in st.secrets:
+    if not _supabase_secrets_ok():
         st.error(
-            "Configure **SUPABASE_URL** and **SUPABASE_ANON_KEY** in `.streamlit/secrets.toml`."
+            "Missing Supabase credentials (or placeholders). "
+            "Cloud: **Secrets** (TOML as in the login screen help), then **Reboot app**. "
+            "Local: `.streamlit/secrets.toml`; run from repo root. "
+            "Optional env: `SUPABASE_URL`, `SUPABASE_ANON_KEY`."
         )
         return
 
