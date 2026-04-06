@@ -1,0 +1,11 @@
+# Sleek dark UI — neon accent pairs with custom CSS in app.py
+[theme]
+base = "dark"
+primaryColor = "#00e8a8"
+backgroundColor = "#0a0a0c"
+secondaryBackgroundColor = "#141418"
+textColor = "#f4f4f5"
+font = "sans serif"
+
+[browser]
+gatherUsageStats = false
